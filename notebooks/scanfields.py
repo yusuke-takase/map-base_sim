@@ -85,6 +85,21 @@ class ScanFields:
         else:
             return self.h[:, spin_n - 1]
 
+    def get_covmat_3D(self):
+        covmat = np.array([
+            [self.get_xlink(0)     , self.get_xlink(-2)/2.0, self.get_xlink(2)/2.0],
+            [self.get_xlink(2)/2.0 , self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
+            [self.get_xlink(-2)/2.0, self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
+            ])
+        return covmat
+
+    def get_covmat_2D(self):
+        covmat = np.array([
+            [self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
+            [self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
+            ])
+        return covmat
+
     def t2b(self):
         """Transform Top detector cross-link to Bottom detector cross-link
         Top and bottom detector make a orthogonal pair.
