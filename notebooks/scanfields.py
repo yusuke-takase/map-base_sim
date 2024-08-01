@@ -5,19 +5,51 @@ import os
 import copy
 from multiprocessing import Pool
 
+class Field:
+    """ Class to store the field data of detectors """
+    def __init__(self, field: np.ndarray, spin: int):
+        """Initialize the class with field and spin data
+
+        Args:
+            field (np.ndarray): field data of the detector
+
+            spin (int): spin number of the detector
+        """
+        if all(isinstance(x, float) for x in field):
+            self.field = field + 1j*np.zeros(len(field))
+        else:
+            self.field = field
+        self.spin = spin
+
+class SignalFields:
+    """ Class to store the signal fields data of detectors """
+    def __init__(self, *fields: Field):
+        """ Initialize the class with field data
+
+        Args:
+            fields (Field): field (map) data of the signal
+        """
+        self.fields = sorted(fields, key=lambda field: field.spin)
+        self.spins = np.array([field.spin for field in self.fields])
+
 class ScanFields:
     """ Class to store the scan fields data of detectors """
     def __init__(self):
         """ Initialize the class with empty data
 
         ss (dict):  of the scanning strategy parameters
-        hitmap (np.ndarray): hitmap of the detector
-        h (np.ndarray): cross-link (orientation function) of the detector
-        spins (np.ndarray): array of spin numbers
-        std (np.ndarray): standard deviation of the hitmap and h
-        mean (np.ndarray): mean of the hitmap and h
-        all_channels (list): list of all the channels in the LiteBIRD
 
+        hitmap (np.ndarray): hitmap of the detector
+
+        h (np.ndarray): cross-link (orientation function) of the detector
+
+        spins (np.ndarray): array of spin numbers
+
+        std (np.ndarray): standard deviation of the hitmap and h
+
+        mean (np.ndarray): mean of the hitmap and h
+
+        all_channels (list): list of all the channels in the LiteBIRD
         """
         self.ss = {}
         self.hitmap = []
@@ -138,8 +170,8 @@ class ScanFields:
         Args:
             spin_n (int): spin number for which the cross-link is to be obtained
 
-            If spin_n is 0, the cross-link for the spin number 0 is returned, i.e,
-            the map which has one in the real part and zero in the imaginary part.
+            If s`pin_n` is 0, the cross-link for the spin number 0 is returned, i.e,
+            the map which has 1 in the real part and zero in the imaginary part.
 
         Returns:
             xlink (1d-np.ndarray): cross-link of the detector for the given spin number
@@ -152,23 +184,25 @@ class ScanFields:
         else:
             return self.h[:, spin_n - 1]
 
-    def get_covmat_3D(self):
-        """Get the covariance matrix of the detector in 3x3 matrix form"""
-        covmat = np.array([
-            [self.get_xlink(0)     , self.get_xlink(-2)/2.0, self.get_xlink(2)/2.0],
-            [self.get_xlink(2)/2.0 , self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
-            [self.get_xlink(-2)/2.0, self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
-            ])
-        return covmat
+    def get_covmat(self, mdim):
+        """Get the covariance matrix of the detector in `mdim`x`mdim` matrix form
 
-    def get_covmat_2D(self):
-        """Get the covariance matrix of the detector in 2x2 matrix form
-        It is used for the defferencial signal analisys.
+        Args:
+            mdim (int): dimension of the covariance matrix.
         """
-        covmat = np.array([
-            [self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
-            [self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
+        if mdim == 2:
+            covmat = np.array([
+                [self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
+                [self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
             ])
+        elif mdim==3:
+            covmat = np.array([
+                [self.get_xlink(0)     , self.get_xlink(-2)/2.0, self.get_xlink(2)/2.0],
+                [self.get_xlink(2)/2.0 , self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
+                [self.get_xlink(-2)/2.0, self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
+                ])
+        else:
+            raise ValueError("mdim is 2 or 3 only supported")
         return covmat
 
     def t2b(self):
@@ -180,9 +214,9 @@ class ScanFields:
         return class_copy
 
     def __add__(self, other):
-        """Add hitmap and h of two Scanfield instances
-        For the hitmap, it adds the hitmap of the two instances
-        For h, it adds the cross-link of the two instances weighted by the hitmap
+        """Add `hitmap` and `h` of two Scanfield instances
+        For the `hitmap`, it adds the `hitmap` of the two instances
+        For `h`, it adds the cross-link of the two instances weighted by the hitmap
         """
         if not isinstance(other, ScanFields):
             return NotImplemented
@@ -193,48 +227,75 @@ class ScanFields:
         result.std = np.array([np.std(result.hitmap), np.std(result.h, axis=0)[0]])
         return result
 
-class Field:
-    """ Class to store the field data of detectors """
-    def __init__(self, field: np.ndarray, spin: int):
-        """Initialize the class with field and spin data
+    def couple(self, signal_fields: SignalFields, spin_out: int):
+        """ Multiply the scan fields and signal fields to get the detected fields by
+        given cross-linking
 
         Args:
-            field (np.ndarray): field data of the detector
-            spin (int): spin number of the detector
+            scan_fields (ScanFields): scan fields data of the detector
+
+            signal_fields (SignalFields): signal fields data of the detector
+
+            spin_out (int): spin number of the output field
+
+        Returns:
+            results (np.ndarray): detected fields by the given cross-linking
         """
-        if all(isinstance(x, float) for x in field):
-            self.field = field + 1j*np.zeros(len(field))
+        results = []
+        for i in range(len(signal_fields.spins)):
+            n = spin_out - signal_fields.spins[i]
+            #print(f"n-n': {n}, n: {signal_fields.spins[i]}")
+            results.append(self.get_xlink(n) * signal_fields.fields[i].field)
+        return np.array(results).sum(0)
+
+    def get_coupled_field(self, signal_fields, mdim):
+        """Get the coupled fields which is obtained by multiplication between cross-link
+        and signal fields
+
+        Args:
+            signal_fields (SignalFields): signal fields data of the detector
+
+            mdim (int): dimension of the system (here, the map)
+
+        Returns:
+            compled_fields (np.ndarray)
+        """
+        s_0 = self.couple(signal_fields, spin_out=0)
+        sp2 = self.couple(signal_fields, spin_out=2)
+        sm2 = self.couple(signal_fields, spin_out=-2)
+        if mdim==2:
+            compled_fields = np.array([sp2/2.0, sm2/2.0])
+        elif mdim==3:
+            compled_fields = np.array([s_0, sp2/2.0, sm2/2.0])
         else:
-            self.field = field
-        self.spin = spin
+            raise ValueError("mdim is 2 or 3 only supported")
+        return compled_fields
 
-class SignalFields:
-    """ Class to store the signal fields data of detectors """
-    def __init__(self, *fields: Field):
-        """ Initialize the class with field data
+    def map_make(self, signal_fields, mdim):
+        """Get the output map by solving the linear equation Ax=b
+        This operation gives us an equivalent result of the simple binning map-making aproach
 
         Args:
-            fields (Field): field (map) data of the signal
+            signal_fields (SignalFields): signal fields data of the detector
+
+            mdim (int): dimension of the liner system
+
+        Returns:
+            output_map (np.ndarray, [`mdim`, `npix`])
         """
-        self.fields = sorted(fields, key=lambda field: field.spin)
-        self.spins = np.array([field.spin for field in self.fields])
-
-def couple_fields(scan_fields: ScanFields, signal_fields: SignalFields, spin_out: int):
-    """ Multiply the scan fields and signal fields to get the detected fields by given cross-linking
-
-    Args:
-        scan_fields (ScanFields): scan fields data of the detector
-
-        signal_fields (SignalFields): signal fields data of the detector
-
-        spin_out (int): spin number of the output field
-
-    Returns:
-        results (np.ndarray): detected fields by the given cross-linking
-    """
-    results = []
-    for i in range(len(signal_fields.spins)):
-        n = spin_out - signal_fields.spins[i]
-        print(f"n-n': {n}, n: {signal_fields.spins[i]}")
-        results.append(scan_fields.get_xlink(n) * signal_fields.fields[i].field)
-    return np.array(results)
+        b = self.get_coupled_field(signal_fields, mdim=mdim)
+        A = self.get_covmat(mdim)
+        x = np.empty_like(b)
+        for i in range(b.shape[1]):
+            x[:,i] = np.linalg.solve(A[:,:,i], b[:,i])
+        if mdim == 2:
+            # None that:
+            # x[0] = Q + iU
+            # x[1] = Q - iU
+            output_map = np.array([np.zeros_like(x[0].real), x[0].real, x[0].imag])
+        if mdim == 3:
+            # None that:
+            # x[1] = Q + iU
+            # x[2] = Q - iU
+            output_map = np.array([x[0].real, x[1].real, x[1].imag])
+        return output_map
