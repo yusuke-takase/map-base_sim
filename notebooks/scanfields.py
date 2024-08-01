@@ -6,7 +6,19 @@ import copy
 from multiprocessing import Pool
 
 class ScanFields:
+    """ Class to store the scan fields data of detectors """
     def __init__(self):
+        """ Initialize the class with empty data
+
+        ss (dict):  of the scanning strategy parameters
+        hitmap (np.ndarray): hitmap of the detector
+        h (np.ndarray): cross-link (orientation function) of the detector
+        spins (np.ndarray): array of spin numbers
+        std (np.ndarray): standard deviation of the hitmap and h
+        mean (np.ndarray): mean of the hitmap and h
+        all_channels (list): list of all the channels in the LiteBIRD
+
+        """
         self.ss = {}
         self.hitmap = []
         self.h = []
@@ -20,7 +32,25 @@ class ScanFields:
         ]
 
     @classmethod
-    def load_det(cls, base_path, filename):
+    def load_det(cls, base_path: str, filename: str):
+        """ Load the scan fields data of a detector from a .h5 file
+
+        Args:
+            base_path (str): path to the directory containing the .h5 file
+
+            filename (str): name of the .h5 file containing the scan fields data simulated by Falcons.jl
+            The fileformat requires cross-link_2407-dataset's format.
+            The file should contain the following groups:
+                - ss: scanning strategy parameters
+                - hitmap: hitmap of the detector
+                - h: cross-link (orientation function) of the detector
+                - quantify: group containing the following datasets
+                    - n: number of spins
+                    - mean: mean of the hitmap and h
+                    - std: standard deviation of the hitmap and h
+        Returns:
+            instance (ScanFields): instance of the ScanFields class containing the scan fields data of the detector
+        """
         assert filename.endswith('.h5'), "Invalid file path. Must be a .h5 file"
         instance = cls()
         with h5py.File(os.path.join(base_path, filename), 'r') as f:
@@ -35,7 +65,17 @@ class ScanFields:
         return instance
 
     @classmethod
-    def load_channel(cls, base_path, channel):
+    def load_channel(cls, base_path: str, channel: str):
+        """Load the scan fields data of a channel from the directory containing the .h5 files
+
+        Args:
+            base_path (str): path to the directory containing the .h5 files
+
+            channel (str): name of the channel to load the scan fields data from
+
+        Returns:
+            instance (ScanFields): instance of the ScanFields class containing the scan fields data of the channel
+        """
         dirpath = os.path.join(base_path, channel)
         filenames = os.listdir(dirpath)
         first_sf = cls.load_det(dirpath, filenames[0])
@@ -58,7 +98,22 @@ class ScanFields:
         return cls.load_channel(base_path, ch)
 
     @classmethod
-    def load_full_FPU(cls, base_path, channel_list, max_workers=None):
+    def load_full_FPU(cls, base_path: str, channel_list: list, max_workers=None):
+        """ Load the scan fields data of all the channels in the FPU from the directory containing the .h5 files
+
+        Args:
+            base_path (str): path to the directory containing the .h5 files
+
+            channel_list (list): list of channels to load the scan fields data from
+
+            max_workers (int): number of processes to use for loading the scan
+                               fields data of the channels. Default is None, which
+                               uses the number of CPUs in the system
+
+        Returns:
+            instance (ScanFields): instance of the ScanFields class containing the scan
+                                   fields data of all the channels in the FPU
+        """
         if max_workers is None:
             max_workers = os.cpu_count()
         print(f"Using {max_workers} processes")
@@ -77,7 +132,19 @@ class ScanFields:
         instance.spins = crosslink_channels[0].spins
         return instance
 
-    def get_xlink(self, spin_n):
+    def get_xlink(self, spin_n: int):
+        """Get the cross-link of the detector for a given spin number
+
+        Args:
+            spin_n (int): spin number for which the cross-link is to be obtained
+
+            If spin_n is 0, the cross-link for the spin number 0 is returned, i.e,
+            the map which has one in the real part and zero in the imaginary part.
+
+        Returns:
+            xlink (1d-np.ndarray): cross-link of the detector for the given spin number
+        """
+
         if spin_n == 0:
             return np.ones_like(self.h[:, 0]) + 1j * np.zeros_like(self.h[:, 0])
         if spin_n < 0:
@@ -86,6 +153,7 @@ class ScanFields:
             return self.h[:, spin_n - 1]
 
     def get_covmat_3D(self):
+        """Get the covariance matrix of the detector in 3x3 matrix form"""
         covmat = np.array([
             [self.get_xlink(0)     , self.get_xlink(-2)/2.0, self.get_xlink(2)/2.0],
             [self.get_xlink(2)/2.0 , self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
@@ -94,6 +162,9 @@ class ScanFields:
         return covmat
 
     def get_covmat_2D(self):
+        """Get the covariance matrix of the detector in 2x2 matrix form
+        It is used for the defferencial signal analisys.
+        """
         covmat = np.array([
             [self.get_xlink(0)/4.0 , self.get_xlink(4)/4.0],
             [self.get_xlink(-4)/4.0, self.get_xlink(0)/4.0]
@@ -102,14 +173,17 @@ class ScanFields:
 
     def t2b(self):
         """Transform Top detector cross-link to Bottom detector cross-link
-        Top and bottom detector make a orthogonal pair.
+        It assume top and bottom detector make a orthogonal pair.
         """
         class_copy = copy.deepcopy(self)
         class_copy.h *= np.exp(-1j * self.spins * (np.pi / 2))
         return class_copy
 
     def __add__(self, other):
-        """Add hitmap and h of two Scanfield instances"""
+        """Add hitmap and h of two Scanfield instances
+        For the hitmap, it adds the hitmap of the two instances
+        For h, it adds the cross-link of the two instances weighted by the hitmap
+        """
         if not isinstance(other, ScanFields):
             return NotImplemented
         result = copy.deepcopy(self)
@@ -118,3 +192,49 @@ class ScanFields:
         result.mean = np.array([np.mean(result.hitmap), np.mean(result.h, axis=0)[0]])
         result.std = np.array([np.std(result.hitmap), np.std(result.h, axis=0)[0]])
         return result
+
+class Field:
+    """ Class to store the field data of detectors """
+    def __init__(self, field: np.ndarray, spin: int):
+        """Initialize the class with field and spin data
+
+        Args:
+            field (np.ndarray): field data of the detector
+            spin (int): spin number of the detector
+        """
+        if all(isinstance(x, float) for x in field):
+            self.field = field + 1j*np.zeros(len(field))
+        else:
+            self.field = field
+        self.spin = spin
+
+class SignalFields:
+    """ Class to store the signal fields data of detectors """
+    def __init__(self, *fields: Field):
+        """ Initialize the class with field data
+
+        Args:
+            fields (Field): field (map) data of the signal
+        """
+        self.fields = sorted(fields, key=lambda field: field.spin)
+        self.spins = np.array([field.spin for field in self.fields])
+
+def couple_fields(scan_fields: ScanFields, signal_fields: SignalFields, spin_out: int):
+    """ Multiply the scan fields and signal fields to get the detected fields by given cross-linking
+
+    Args:
+        scan_fields (ScanFields): scan fields data of the detector
+
+        signal_fields (SignalFields): signal fields data of the detector
+
+        spin_out (int): spin number of the output field
+
+    Returns:
+        results (np.ndarray): detected fields by the given cross-linking
+    """
+    results = []
+    for i in range(len(signal_fields.spins)):
+        n = spin_out - signal_fields.spins[i]
+        print(f"n-n': {n}, n: {signal_fields.spins[i]}")
+        results.append(scan_fields.get_xlink(n) * signal_fields.fields[i].field)
+    return np.array(results)
