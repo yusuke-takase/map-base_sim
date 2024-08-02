@@ -60,8 +60,6 @@ class ScanFields:
         self.hitmap = []
         self.h = []
         self.spins = []
-        self.mean = []
-        self.std = []
         self.compled_fields = None
         self.mdim = None
         self.ndet = None
@@ -70,7 +68,7 @@ class ScanFields:
             'M1-100','M2-119','M1-140','M2-166','M1-195',
             'H1-195','H2-235','H1-280','H2-337','H3-402'
         ]
-        self.fwhms = [70.5,58.5,51.1,41.6,47.1,36.9,43.8,33.0,41.5,30.2,26.3,23.7,37.8,33.6,30.8,28.9,28.0,28.6,24.7,22.5,20.9,17.9,]
+        self.fwhms = [70.5,58.5,51.1,41.6,47.1,36.9,43.8,33.0,41.5,30.2,26.3,23.7,37.8,33.6,30.8,28.9,28.0,28.6,24.7,22.5,20.9,17.9]
 
     @classmethod
     def load_det(cls, base_path: str, filename: str):
@@ -100,6 +98,7 @@ class ScanFields:
             instance.hitmap = f['hitmap'][:]
             instance.h = f['h'][:, 0, :]
             instance.h[np.isnan(instance.h)] = 1.0
+            instance.spins = f['quantify']['n'][()]
         return instance
 
     @classmethod
@@ -128,14 +127,6 @@ class ScanFields:
         instance.h /= instance.hitmap[:, np.newaxis]
         instance.spins = first_sf.spins
         return instance
-
-    def initialize(self, mdim):
-        self.hitmap = np.zeros_like(self.hitmap)
-        self.h = np.zeros_like(self.h)
-        self.spins = np.zeros_like(self.spins)
-        self.mdim = mdim
-        self.ndet = 0
-        self.coupled_fields = np.zeros([self.mdim, len(self.hitmap)], dtype=np.complex128)
 
     @classmethod
     def _load_channel_task(cls, args):
@@ -177,6 +168,14 @@ class ScanFields:
         instance.h = h / hitmap[:, np.newaxis]
         instance.spins = crosslink_channels[0].spins
         return instance
+
+    def initialize(self, mdim):
+        self.hitmap = np.zeros_like(self.hitmap)
+        self.h = np.zeros_like(self.h)
+        self.spins = np.zeros_like(self.spins)
+        self.mdim = mdim
+        self.ndet = 0
+        self.coupled_fields = np.zeros([self.mdim, len(self.hitmap)], dtype=np.complex128)
 
     def get_xlink(self, spin_n: int):
         """Get the cross-link of the detector for a given spin number
