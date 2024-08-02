@@ -21,6 +21,10 @@ class Field:
             self.field = field
         self.spin = spin
 
+    def conj(self):
+        """Get the complex conjugate of the field"""
+        return Field(self.field.conj(), -self.spin)
+
 class SignalFields:
     """ Class to store the signal fields data of detectors """
     def __init__(self, *fields: Field):
@@ -57,6 +61,9 @@ class ScanFields:
         self.spins = []
         self.mean = []
         self.std = []
+        self.compled_fields = None
+        self.mdim = None
+        self.ndet = None
         self.all_channels = [
             'L1-040','L2-050','L1-060','L3-068','L2-068','L4-078','L1-078','L3-089','L2-089','L4-100','L3-119','L4-140',
             'M1-100','M2-119','M1-140','M2-166','M1-195',
@@ -85,15 +92,12 @@ class ScanFields:
         """
         assert filename.endswith('.h5'), "Invalid file path. Must be a .h5 file"
         instance = cls()
+        instance.ndet = 1
         with h5py.File(os.path.join(base_path, filename), 'r') as f:
             instance.ss = {key: value[()] for key, value in zip(f['ss'].keys(), f['ss'].values()) if key != "quat"}
             instance.hitmap = f['hitmap'][:]
             instance.h = f['h'][:, 0, :]
             instance.h[np.isnan(instance.h)] = 1.0
-            quantify_group = f['quantify']
-            instance.spins = quantify_group['n'][()]
-            instance.mean = quantify_group['mean'][()]
-            instance.std = quantify_group['std'][()]
         return instance
 
     @classmethod
@@ -112,6 +116,7 @@ class ScanFields:
         filenames = os.listdir(dirpath)
         first_sf = cls.load_det(dirpath, filenames[0])
         instance = cls()
+        instance.ndet = len(filenames)
         instance.hitmap = np.zeros_like(first_sf.hitmap)
         instance.h = np.zeros_like(first_sf.h)
         for filename in filenames:
@@ -119,10 +124,16 @@ class ScanFields:
             instance.hitmap += sf.hitmap
             instance.h += sf.hitmap[:, np.newaxis] * sf.h
         instance.h /= instance.hitmap[:, np.newaxis]
-        instance.mean = np.array([np.mean(instance.hitmap), np.mean(instance.h, axis=0)[0]])
-        instance.std = np.array([np.std(instance.hitmap), np.std(instance.h, axis=0)[0]])
         instance.spins = first_sf.spins
         return instance
+
+    def initialize(self, mdim):
+        self.hitmap = np.zeros_like(self.hitmap)
+        self.h = np.zeros_like(self.h)
+        self.spins = np.zeros_like(self.spins)
+        self.mdim = mdim
+        self.ndet = 0
+        self.coupled_fields = np.zeros([self.mdim, len(self.hitmap)], dtype=np.complex128)
 
     @classmethod
     def _load_channel_task(cls, args):
@@ -154,13 +165,14 @@ class ScanFields:
         instance = cls()
         hitmap = np.zeros_like(crosslink_channels[0].hitmap)
         h = np.zeros_like(crosslink_channels[0].h)
+        ndet = 0
         for sf in crosslink_channels:
             hitmap += sf.hitmap
             h += sf.hitmap[:, np.newaxis] * sf.h
+            ndet += sf.ndet
+        instance.ndet = ndet
         instance.hitmap = hitmap
         instance.h = h / hitmap[:, np.newaxis]
-        instance.mean = np.array([np.mean(hitmap), np.mean(h, axis=0)[0]])
-        instance.std = np.array([np.std(hitmap), np.std(h, axis=0)[0]])
         instance.spins = crosslink_channels[0].spins
         return instance
 
@@ -223,11 +235,9 @@ class ScanFields:
         result = copy.deepcopy(self)
         result.hitmap += other.hitmap
         result.h = (self.h*self.hitmap[:, np.newaxis] + other.h*other.hitmap[:, np.newaxis])/result.hitmap[:, np.newaxis]
-        result.mean = np.array([np.mean(result.hitmap), np.mean(result.h, axis=0)[0]])
-        result.std = np.array([np.std(result.hitmap), np.std(result.h, axis=0)[0]])
         return result
 
-    def couple(self, signal_fields: SignalFields, spin_out: int):
+    def get_coupled_field(self, signal_fields: SignalFields, spin_out: int):
         """ Multiply the scan fields and signal fields to get the detected fields by
         given cross-linking
 
@@ -248,7 +258,44 @@ class ScanFields:
             results.append(self.get_xlink(n) * signal_fields.fields[i].field)
         return np.array(results).sum(0)
 
-    def get_coupled_field(self, signal_fields, mdim):
+    @classmethod
+    def sim_diff_gain_channel(
+        cls,
+        base_path: str,
+        channel: str,
+        mdim: int,
+        input_map: np.ndarray,
+        gain_a: np.ndarray,
+        gain_b: np.ndarray
+        ):
+        dirpath = os.path.join(base_path, channel)
+        filenames = os.listdir(dirpath)
+        assert len(filenames) == len(gain_a) == len(gain_b)
+        total_sf = cls.load_det(dirpath, filenames[0])
+        total_sf.initialize(mdim)
+        total_sf.ndet = len(filenames)
+        assert input_map.shape == (3,len(total_sf.hitmap))
+        I = input_map[0]
+        P = input_map[1] + 1j*input_map[2]
+        for i,filename in enumerate(filenames):
+            sf = cls.load_det(dirpath, filename)
+            delta_g = gain_a[i] - gain_b[i]
+            signal_fields = SignalFields(
+                Field(delta_g*I/2.0, spin=0),
+                Field((2.0+gain_a[i]+gain_b[i])*P/4.0, spin=2),
+                Field((2.0+gain_a[i]+gain_b[i])*P.conj()/4.0, spin=-2),
+            )
+            sf.couple(signal_fields, mdim)
+            total_sf.hitmap += sf.hitmap
+            total_sf.h += sf.h * sf.hitmap[:, np.newaxis]
+            total_sf.coupled_fields += sf.coupled_fields * sf.hitmap
+        total_sf.coupled_fields /= total_sf.hitmap
+        total_sf.h /= total_sf.hitmap[:, np.newaxis]
+        return total_sf
+
+
+
+    def couple(self, signal_fields, mdim):
         """Get the coupled fields which is obtained by multiplication between cross-link
         and signal fields
 
@@ -260,16 +307,17 @@ class ScanFields:
         Returns:
             compled_fields (np.ndarray)
         """
-        s_0 = self.couple(signal_fields, spin_out=0)
-        sp2 = self.couple(signal_fields, spin_out=2)
-        sm2 = self.couple(signal_fields, spin_out=-2)
-        if mdim==2:
-            compled_fields = np.array([sp2/2.0, sm2/2.0])
-        elif mdim==3:
-            compled_fields = np.array([s_0, sp2/2.0, sm2/2.0])
+        self.mdim = mdim
+        s_0 = self.get_coupled_field(signal_fields, spin_out=0)
+        sp2 = self.get_coupled_field(signal_fields, spin_out=2)
+        sm2 = self.get_coupled_field(signal_fields, spin_out=-2)
+        if self.mdim==2:
+            coupled_fields = np.array([sp2/2.0, sm2/2.0])
+        elif self.mdim==3:
+            coupled_fields = np.array([s_0, sp2/2.0, sm2/2.0])
         else:
             raise ValueError("mdim is 2 or 3 only supported")
-        return compled_fields
+        self.coupled_fields = coupled_fields
 
     def map_make(self, signal_fields, mdim):
         """Get the output map by solving the linear equation Ax=b
@@ -283,7 +331,8 @@ class ScanFields:
         Returns:
             output_map (np.ndarray, [`mdim`, `npix`])
         """
-        b = self.get_coupled_field(signal_fields, mdim=mdim)
+        self.couple(signal_fields, mdim=mdim)
+        b = self.coupled_fields
         A = self.get_covmat(mdim)
         x = np.empty_like(b)
         for i in range(b.shape[1]):
@@ -294,6 +343,28 @@ class ScanFields:
             # x[1] = Q - iU
             output_map = np.array([np.zeros_like(x[0].real), x[0].real, x[0].imag])
         if mdim == 3:
+            # None that:
+            # x[1] = Q + iU
+            # x[2] = Q - iU
+            output_map = np.array([x[0].real, x[1].real, x[1].imag])
+        return output_map
+
+    def solve(self):
+        """Get the output map by solving the linear equation Ax=b
+        This operation gives us an equivalent result of the simple binning map-making aproach
+        """
+        assert self.coupled_fields is not None, "Couple the fields first"
+        b = self.coupled_fields
+        A = self.get_covmat(self.mdim)
+        x = np.empty_like(b)
+        for i in range(b.shape[1]):
+            x[:,i] = np.linalg.solve(A[:,:,i], b[:,i])
+        if self.mdim == 2:
+            # None that:
+            # x[0] = Q + iU
+            # x[1] = Q - iU
+            output_map = np.array([np.zeros_like(x[0].real), x[0].real, x[0].imag])
+        if self.mdim == 3:
             # None that:
             # x[1] = Q + iU
             # x[2] = Q - iU
