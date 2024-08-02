@@ -4,6 +4,7 @@ import healpy as hp
 import os
 import copy
 from multiprocessing import Pool
+import matplotlib.pyplot as plt
 
 class Field:
     """ Class to store the field data of detectors """
@@ -69,6 +70,7 @@ class ScanFields:
             'M1-100','M2-119','M1-140','M2-166','M1-195',
             'H1-195','H2-235','H1-280','H2-337','H3-402'
         ]
+        self.fwhms = [70.5,58.5,51.1,41.6,47.1,36.9,43.8,33.0,41.5,30.2,26.3,23.7,37.8,33.6,30.8,28.9,28.0,28.6,24.7,22.5,20.9,17.9,]
 
     @classmethod
     def load_det(cls, base_path: str, filename: str):
@@ -293,7 +295,72 @@ class ScanFields:
         total_sf.h /= total_sf.hitmap[:, np.newaxis]
         return total_sf
 
+    @staticmethod
+    def _diff_pointing_field(
+        rho: float,
+        chi: float,
+        I: np.ndarray,
+        P: np.ndarray,
+        eth_I: np.ndarray,
+        eth_P: np.ndarray
+        ):
+        spin_0_field  = Field(I, spin=0)
+        spin_1_field  = Field(-rho/2*np.exp(1j*chi)*eth_I, spin=1)
+        spin_m1_field = spin_1_field.conj()
+        spin_2_field  = Field(P/2.0, spin=2)
+        spin_m2_field = spin_2_field.conj()
+        spin_3_field  = Field(-rho/4*np.exp(1j*chi)*eth_P, spin=3)
+        spin_m3_field = spin_3_field.conj()
+        diff_pointing_field = SignalFields(
+            spin_0_field,
+            spin_1_field,
+            spin_m1_field,
+            spin_2_field,
+            spin_m2_field,
+            spin_3_field,
+            spin_m3_field,
+        )
+        return diff_pointing_field
 
+    @classmethod
+    def sim_diff_pointing_channel(
+        cls,
+        base_path: str,
+        channel: str,
+        mdim: int,
+        input_map: np.ndarray,
+        rho: np.ndarray, # Pointing offset magnitude
+        chi: np.ndarray  # Pointing offset direction
+        ):
+
+        dirpath = os.path.join(base_path, channel)
+        filenames = os.listdir(dirpath)
+        assert len(filenames) == len(rho) == len(chi)
+        total_sf = cls.load_det(dirpath, filenames[0])
+        total_sf.initialize(mdim)
+        total_sf.ndet = len(filenames)
+        assert input_map.shape == (3,len(total_sf.hitmap))
+
+        I = input_map[0]
+        P = input_map[1] + 1j*input_map[2]
+        nside = hp.npix2nside(len(I))
+        dI = hp.alm2map_der1(hp.map2alm(input_map[0]), nside=nside)
+        dQ = hp.alm2map_der1(hp.map2alm(input_map[1]), nside=nside)
+        dU = hp.alm2map_der1(hp.map2alm(input_map[2]), nside=nside)
+
+        eth_I = dI[2] - dI[1]*1j
+        eth_P = dQ[2] + dU[1] - (dQ[1] - dU[2])*1j
+
+        for i,filename in enumerate(filenames):
+            sf = cls.load_det(dirpath, filename)
+            signal_fields = ScanFields._diff_pointing_field(rho[i], chi[i], I, P, eth_I, eth_P)
+            sf.couple(signal_fields, mdim)
+            total_sf.hitmap += sf.hitmap
+            total_sf.h += sf.h * sf.hitmap[:, np.newaxis]
+            total_sf.coupled_fields += sf.coupled_fields * sf.hitmap
+        total_sf.coupled_fields /= total_sf.hitmap
+        total_sf.h /= total_sf.hitmap[:, np.newaxis]
+        return total_sf
 
     def couple(self, signal_fields, mdim):
         """Get the coupled fields which is obtained by multiplication between cross-link
@@ -370,3 +437,32 @@ class ScanFields:
             # x[2] = Q - iU
             output_map = np.array([x[0].real, x[1].real, x[1].imag])
         return output_map
+
+
+def plot_maps(mdim, input_map, output_map, residual):
+    if mdim == 2:
+        plt.figure(figsize=(10,5))
+        hp.mollview(input_map[1], sub=(1,2,1), title="Input $Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(input_map[2], sub=(1,2,2), title="Input $U$", unit="$\mu K_{CMB}$")
+
+        plt.figure(figsize=(10,5))
+        hp.mollview(output_map[1], sub=(1,2,1), title="Output $Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(output_map[2], sub=(1,2,2), title="Output $U$", unit="$\mu K_{CMB}$")
+
+        plt.figure(figsize=(10,5))
+        hp.mollview(residual[1], sub=(1,2,1), title="Residual $\Delta Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(residual[2], sub=(1,2,2), title="Residual $\Delta U$", unit="$\mu K_{CMB}$")
+    elif mdim == 3:
+        plt.figure(figsize=(15,5))
+        hp.mollview(input_map[0], sub=(1,3,1), title="Input $T$", unit="$\mu K_{CMB}$")
+        hp.mollview(input_map[1], sub=(1,3,2), title="Input $Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(input_map[2], sub=(1,3,3), title="Input $U$", unit="$\mu K_{CMB}$")
+
+        plt.figure(figsize=(15,5))
+        hp.mollview(output_map[0], sub=(1,3,1), title="Output $T$", unit="$\mu K_{CMB}$")
+        hp.mollview(output_map[1], sub=(1,3,2), title="Output $Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(output_map[2], sub=(1,3,3), title="Output $U$", unit="$\mu K_{CMB}$")
+
+        plt.figure(figsize=(15,5))
+        hp.mollview(residual[1], sub=(1,2,1), title="Residual $\Delta Q$", unit="$\mu K_{CMB}$")
+        hp.mollview(residual[2], sub=(1,2,2), title="Residual $\Delta U$", unit="$\mu K_{CMB}$")
